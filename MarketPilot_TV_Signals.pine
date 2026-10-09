@@ -1,0 +1,98 @@
+//@version=6
+indicator("MarketPilot • Real TradingView 5m Signals (Paper Only)", overlay=true, max_labels_count=200)
+
+// Apply to a real STOCK's 5-minute chart. Enable extended session bars if available.
+// Calculations use TradingView's native chart feed. Only CLOSED bars generate signals.
+// The external website cannot extract these values from an embedded TradingView widget.
+volumeFactor = input.float(1.2, "Volume vs trailing 20 bars", minval=1, maxval=5, step=0.1)
+minRewardRisk = input.float(1.5, "Minimum underlying reward/risk", minval=1, maxval=5, step=0.25)
+relStrengthMin = input.float(0.20, "Minimum strength vs SPY, percentage points", minval=0, step=0.1)
+showLabels = input.bool(true, "Mark qualified setups on the stock chart")
+
+// Confirmed, previously CLOSED daily values prevent using tomorrow's unfinished daily bar.
+regularTicker = ticker.new(syminfo.prefix, syminfo.ticker, session.regular)
+[dayEma9, daySma50, dayAtr14, priorHigh, priorLow, priorClose, tenDayHigh, tenDayLow] = request.security(regularTicker, "D", [ta.ema(close, 9)[1], ta.sma(close, 50)[1], ta.atr(14)[1], high[1], low[1], close[1], ta.highest(high, 10)[1], ta.lowest(low, 10)[1]], lookahead=barmerge.lookahead_on)
+spyCloseNow = request.security("AMEX:SPY", timeframe.period, close)
+spyPriorClose = request.security("AMEX:SPY", "D", close[1], lookahead=barmerge.lookahead_on)
+relativePct = (not na(priorClose) and priorClose > 0 and not na(spyPriorClose) and spyPriorClose > 0) ? ((close / priorClose - 1.0) - (spyCloseNow / spyPriorClose - 1.0)) * 100.0 : na
+
+// Sessions are specified using the actual NY exchange hours; LA display adjusts for DST automatically.
+isPremarket = not na(time(timeframe.period, "0400-0930:1234567", "America/New_York"))
+isRegular = not na(time(timeframe.period, "0930-1600:1234567", "America/New_York"))
+isEntryWindow = not na(time(timeframe.period, "0935-1100:1234567", "America/New_York"))
+newExchangeDay = ta.change(dayofmonth(time, "America/New_York")) != 0
+var float pmHigh = na
+var float pmLow = na
+if newExchangeDay
+    pmHigh := na
+    pmLow := na
+if isPremarket
+    pmHigh := na(pmHigh) ? high : math.max(pmHigh, high)
+    pmLow := na(pmLow) ? low : math.min(pmLow, low)
+
+intradayEma9 = ta.ema(close, 9)
+volumeAverage = ta.sma(volume, 20)
+volumeOK = not na(volumeAverage) and volume > volumeAverage * volumeFactor
+levelsOK = not na(pmHigh) and not na(pmLow) and not na(priorHigh) and not na(priorLow)
+bullLevel = levelsOK ? math.max(pmHigh, priorHigh) : na
+bearLevel = levelsOK ? math.min(pmLow, priorLow) : na
+
+// We require a real breakout close OR a bullish/bearish retest of the broken level.
+bullBreak = levelsOK and close > bullLevel and close[1] <= bullLevel
+bearBreak = levelsOK and close < bearLevel and close[1] >= bearLevel
+bullRetest = levelsOK and close > bullLevel and low <= bullLevel and close > open
+bearRetest = levelsOK and close < bearLevel and high >= bearLevel and close < open
+
+// A 3-candle structure stop, or the broken level if lower/higher. No arbitrary $ stop.
+bullStop = levelsOK ? math.min(bullLevel, ta.lowest(low, 3)) : na
+bearStop = levelsOK ? math.max(bearLevel, ta.highest(high, 3)) : na
+bullTarget = tenDayHigh > close ? tenDayHigh : na
+bearTarget = tenDayLow < close ? tenDayLow : na
+bullRR = not na(bullTarget) and close > bullStop ? (bullTarget - close) / (close - bullStop) : na
+bearRR = not na(bearTarget) and close < bearStop ? (close - bearTarget) / (bearStop - close) : na
+
+bullContext = not na(dayEma9) and not na(daySma50) and close > dayEma9 and dayEma9 > daySma50 and relativePct >= relStrengthMin
+bearContext = not na(dayEma9) and not na(daySma50) and close < dayEma9 and dayEma9 < daySma50 and relativePct <= -relStrengthMin
+ready = timeframe.isminutes and timeframe.multiplier == 5 and barstate.isconfirmed and isRegular and isEntryWindow and levelsOK and not na(relativePct)
+callReview = ready and bullContext and volumeOK and (bullBreak or bullRetest) and not na(bullRR) and bullRR >= minRewardRisk
+putReview = ready and bearContext and volumeOK and (bearBreak or bearRetest) and not na(bearRR) and bearRR >= minRewardRisk
+
+plot(intradayEma9, "5m EMA 9", color=color.aqua, linewidth=2)
+plot(pmHigh, "Premarket high", color=color.new(color.purple, 25), style=plot.style_linebr)
+plot(pmLow, "Premarket low", color=color.new(color.purple, 25), style=plot.style_linebr)
+plot(priorHigh, "Prior day high", color=color.new(color.orange, 55), style=plot.style_linebr)
+plot(priorLow, "Prior day low", color=color.new(color.orange, 55), style=plot.style_linebr)
+plotshape(showLabels and callReview, title="REVIEW CALL", text="REVIEW\nCALL", style=shape.labelup, location=location.belowbar, color=color.teal, textcolor=color.white, size=size.tiny)
+plotshape(showLabels and putReview, title="REVIEW PUT", text="REVIEW\nPUT", style=shape.labeldown, location=location.abovebar, color=color.red, textcolor=color.white, size=size.tiny)
+
+// JSON must use actual TradingView values. Null represents unavailable levels.
+jsonNumber(float x) => na(x) ? "null" : str.tostring(x, "#.########")
+jsonTime(int x) => str.tostring(x)
+
+string signal = callReview ? "REVIEW_CALL" : putReview ? "REVIEW_PUT" : "WAIT"
+float stopValue = callReview ? bullStop : putReview ? bearStop : na
+float targetValue = callReview ? bullTarget : putReview ? bearTarget : na
+float rrValue = callReview ? bullRR : putReview ? bearRR : na
+string symbolName = syminfo.ticker
+string stockExchange = syminfo.prefix
+
+// Do not fire intrabar updates. Each alert is a confirmed five-minute snapshot.
+if barstate.isconfirmed and isRegular and timeframe.isminutes and timeframe.multiplier == 5
+    string body = '{"source":"TradingView Pine v6","ticker":"' + symbolName + '","exchange":"' + stockExchange + '","interval":"5","bar_time_ms":' + jsonTime(time_close) + ',"open":' + jsonNumber(open) + ',"high":' + jsonNumber(high) + ',"low":' + jsonNumber(low) + ',"close":' + jsonNumber(close) + ',"volume":' + jsonNumber(volume) + ',"volume_average":' + jsonNumber(volumeAverage) + ',"daily_ema9":' + jsonNumber(dayEma9) + ',"daily_sma50":' + jsonNumber(daySma50) + ',"daily_atr14":' + jsonNumber(dayAtr14) + ',"prior_high":' + jsonNumber(priorHigh) + ',"prior_low":' + jsonNumber(priorLow) + ',"premarket_high":' + jsonNumber(pmHigh) + ',"premarket_low":' + jsonNumber(pmLow) + ',"relative_strength_pct":' + jsonNumber(relativePct) + ',"bull_level":' + jsonNumber(bullLevel) + ',"bear_level":' + jsonNumber(bearLevel) + ',"stop":' + jsonNumber(stopValue) + ',"target":' + jsonNumber(targetValue) + ',"underlying_rr":' + jsonNumber(rrValue) + ',"decision":"' + signal + '"}'
+    alert(body, alert.freq_once_per_bar_close)
+
+// Visible status inside native TradingView, including Basic accounts without webhooks.
+var table info = table.new(position.top_right, 2, 6, border_width=1)
+if barstate.islast
+    table.cell(info, 0, 0, "MarketPilot", bgcolor=color.new(color.navy, 30), text_color=color.white)
+    table.cell(info, 1, 0, signal, bgcolor=callReview ? color.new(color.teal, 25) : putReview ? color.new(color.red, 25) : color.new(color.gray, 60), text_color=color.white)
+    table.cell(info, 0, 1, "Daily EMA9 / SMA50", text_color=color.white)
+    table.cell(info, 1, 1, str.tostring(dayEma9, "#.##") + " / " + str.tostring(daySma50, "#.##"), text_color=color.white)
+    table.cell(info, 0, 2, "Vs SPY (pp)", text_color=color.white)
+    table.cell(info, 1, 2, str.tostring(relativePct, "#.##"), text_color=color.white)
+    table.cell(info, 0, 3, "Premarket H / L", text_color=color.white)
+    table.cell(info, 1, 3, str.tostring(pmHigh, "#.##") + " / " + str.tostring(pmLow, "#.##"), text_color=color.white)
+    table.cell(info, 0, 4, "Target / stop", text_color=color.white)
+    table.cell(info, 1, 4, str.tostring(targetValue, "#.##") + " / " + str.tostring(stopValue, "#.##"), text_color=color.white)
+    table.cell(info, 0, 5, "Rule: paper trades only", text_color=color.white)
+    table.cell(info, 1, 5, "5m CLOSED bars", text_color=color.white)

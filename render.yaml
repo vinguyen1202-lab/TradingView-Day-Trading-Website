@@ -1,0 +1,15 @@
+services:
+  - type: web
+    name: marketpilot-tradingview-paper
+    runtime: python
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn app:app --host 0.0.0.0 --port $PORT
+    healthCheckPath: /health
+    envVars:
+      - key: TV_WEBHOOK_TOKEN
+        generateValue: true
+      - key: MARKETPILOT_DB
+        value: /tmp/marketpilot_signals.sqlite
+      - key: PYTHON_VERSION
+        value: 3.11.11

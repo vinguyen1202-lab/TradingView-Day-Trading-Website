@@ -1,0 +1,15 @@
+MARKETPILOT — BEGINNER QUICK START
+
+1. Click the browser preview to explore real OCTOBER 9 historical TradingView prices.
+   They are not live and cannot justify a current trade.
+2. Deploy the ZIP's contents to a PRIVATE GitHub repo and Render Blueprint.
+3. Render generates your private webhook token. Copy it privately from the Environment page.
+4. Add the included Pine Script in TradingView on a 5-minute chart, enable extended hours,
+   create an alert with Any alert() function call, and configure the webhook URL.
+5. New candle alerts will now appear at MarketPilot. Decision stays WAIT if data are old,
+   unavailable, or the stock/setup/option fail rules.
+
+Paid TradingView alone does NOT make this website automatically connected to its MCP data.
+Webhook signal delivery is the website connection. No real brokerage orders are placed.
+
+Read README.md for screenshots-free details, Render instructions, security and limitations.
