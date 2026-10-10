@@ -11,9 +11,12 @@ import os
 import re
 import sqlite3
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
+from urllib.parse import urlencode
+from urllib.request import Request as URLRequest, urlopen
+from urllib.error import HTTPError, URLError
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
@@ -111,6 +114,161 @@ async def verified_history(ticker: str):
 
 
 
+ALPACA_API_KEY = os.getenv("ALPACA_API_KEY_ID", os.getenv("APCA_API_KEY_ID", os.getenv("ALPACA_API_KEY", ""))).strip()
+ALPACA_API_SECRET = os.getenv("ALPACA_API_SECRET_KEY", os.getenv("APCA_API_SECRET_KEY", os.getenv("ALPACA_SECRET_KEY", ""))).strip()
+ALPACA_FEED = os.getenv("ALPACA_OPTIONS_FEED", "indicative").strip().lower()
+ALPACA_CACHE = {}
+ALPACA_CACHE_SECONDS = 15
+
+
+def alpaca_credentials():
+    if not ALPACA_API_KEY or not ALPACA_API_SECRET:
+        raise HTTPException(503, "Alpaca market data is not configured. Add the API key and secret to the Render service environment.")
+    if ALPACA_FEED not in ("indicative", "opra"):
+        raise HTTPException(503, "ALPACA_OPTIONS_FEED must be indicative or opra.")
+    return ALPACA_FEED
+
+
+def alpaca_get(url, params):
+    query = urlencode({k: v for k, v in params.items() if v is not None})
+    request = URLRequest(url + ("?" + query if query else ""), headers={
+        "APCA-API-KEY-ID": ALPACA_API_KEY,
+        "APCA-API-SECRET-KEY": ALPACA_API_SECRET,
+        "Accept": "application/json",
+        "User-Agent": "MarketPilot-option-chain/1.0",
+    })
+    try:
+        with urlopen(request, timeout=12) as response:
+            return json.loads(response.read().decode("utf-8"))
+    except HTTPError as exc:
+        if exc.code == 401:
+            message = "Alpaca rejected the API credentials. Check the key and secret saved in Render."
+        elif exc.code == 403:
+            message = "Alpaca denied this options data feed. Check that your account has access to the configured feed."
+        elif exc.code == 429:
+            message = "Alpaca rate limit reached. Wait briefly and refresh."
+        elif exc.code == 404:
+            message = "Alpaca returned no matching options data for this ticker."
+        else:
+            message = f"Alpaca market-data request failed (HTTP {exc.code})."
+        raise HTTPException(502, message)
+    except (URLError, TimeoutError):
+        raise HTTPException(502, "Could not reach Alpaca market data. Try again shortly.")
+    except (ValueError, json.JSONDecodeError):
+        raise HTTPException(502, "Alpaca returned an unreadable market-data response.")
+
+
+def alpaca_contracts(ticker, start_date, end_date, option_type=None):
+    rows = []
+    page_token = None
+    for _ in range(5):
+        params = {
+            "underlying_symbols": ticker, "status": "active",
+            "expiration_date_gte": start_date, "expiration_date_lte": end_date,
+            "type": option_type, "limit": 10000, "page_token": page_token,
+        }
+        payload = alpaca_get("https://paper-api.alpaca.markets/v2/options/contracts", params)
+        rows.extend(payload.get("option_contracts", []))
+        page_token = payload.get("next_page_token") or payload.get("page_token")
+        if not page_token:
+            break
+    return rows
+
+
+def alpaca_option_snapshots(ticker, expiration, option_type, feed):
+    rows = []
+    page_token = None
+    for _ in range(10):
+        payload = alpaca_get(
+            f"https://data.alpaca.markets/v1beta1/options/snapshots/{ticker}",
+            {"feed": feed, "expiration_date": expiration, "type": option_type,
+             "limit": 1000, "page_token": page_token},
+        )
+        snapshots = payload.get("snapshots", {})
+        if isinstance(snapshots, dict):
+            rows.extend({"symbol": symbol, **(value or {})} for symbol, value in snapshots.items())
+        page_token = payload.get("next_page_token")
+        if not page_token:
+            break
+    return rows
+
+
+@app.get("/api/options/{ticker}/expirations")
+def option_expirations(ticker: str):
+    ticker = ticker.strip().upper()
+    if not TICKER.fullmatch(ticker):
+        raise HTTPException(400, "Invalid ticker")
+    feed = alpaca_credentials()
+    today = datetime.now(PT).date()
+    start = (today.replace() + timedelta(days=7)).isoformat()
+    end = (today.replace() + timedelta(days=21)).isoformat()
+    cache_key = ("expirations", ticker, feed)
+    cached = ALPACA_CACHE.get(cache_key)
+    if cached and time.monotonic() - cached[0] < ALPACA_CACHE_SECONDS:
+        return cached[1]
+    contracts = alpaca_contracts(ticker, start, end)
+    expirations = sorted({str(c.get("expiration_date")) for c in contracts if c.get("expiration_date")})
+    result = {"ticker": ticker, "feed": feed, "expirations": expirations,
+              "note": "Indicative options feed: trades are delayed and quotes are modified." if feed == "indicative" else "OPRA options feed.",
+              "open_interest_as_of": max((str(c.get("open_interest_date")) for c in contracts if c.get("open_interest_date")), default=None)}
+    if len(ALPACA_CACHE) > 200: ALPACA_CACHE.clear()
+    ALPACA_CACHE[cache_key] = (time.monotonic(), result)
+    return result
+
+
+@app.get("/api/options/{ticker}/chain")
+def option_chain(ticker: str, expiration_date: str, option_type: str = "call"):
+    ticker = ticker.strip().upper()
+    if not TICKER.fullmatch(ticker):
+        raise HTTPException(400, "Invalid ticker")
+    if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", expiration_date):
+        raise HTTPException(400, "Expiration date must be YYYY-MM-DD")
+    option_type = option_type.strip().lower()
+    if option_type not in ("call", "put"):
+        raise HTTPException(400, "Option type must be call or put")
+    feed = alpaca_credentials()
+    try:
+        expiration = datetime.strptime(expiration_date, "%Y-%m-%d").date()
+    except ValueError:
+        raise HTTPException(400, "Invalid expiration date")
+    today = datetime.now(PT).date()
+    if expiration < today or (expiration - today).days > 60:
+        raise HTTPException(400, "Expiration must be within the next 60 days")
+    cache_key = ("chain", ticker, expiration_date, option_type, feed)
+    cached = ALPACA_CACHE.get(cache_key)
+    if cached and time.monotonic() - cached[0] < ALPACA_CACHE_SECONDS:
+        return cached[1]
+    contracts = alpaca_contracts(ticker, expiration_date, expiration_date, option_type)
+    snapshots = alpaca_option_snapshots(ticker, expiration_date, option_type, feed)
+    snapshot_by_symbol = {row["symbol"]: row for row in snapshots}
+    chain = []
+    for contract in contracts:
+        symbol = contract.get("symbol", "")
+        snap = snapshot_by_symbol.get(symbol, {})
+        quote = snap.get("latestQuote") or {}
+        greeks = snap.get("greeks") or {}
+        daily = snap.get("dailyBar") or {}
+        chain.append({
+            "symbol": symbol, "underlying": ticker, "type": option_type,
+            "expiration": contract.get("expiration_date"),
+            "strike": float(contract.get("strike_price") or 0),
+            "bid": quote.get("bp"), "ask": quote.get("ap"),
+            "quote_timestamp": quote.get("t"),
+            "bid_size": quote.get("bs"), "ask_size": quote.get("as"),
+            "delta": greeks.get("delta"), "implied_volatility": snap.get("impliedVolatility"),
+            "volume": daily.get("v", 0),
+            "open_interest": int(float(contract.get("open_interest") or 0)),
+            "open_interest_date": contract.get("open_interest_date"),
+        })
+    result = {"ticker": ticker, "expiration": expiration_date, "type": option_type,
+              "feed": feed, "quote_count": len(snapshots), "contracts_count": len(chain),
+              "note": "Indicative options feed: trades are delayed and quotes are modified." if feed == "indicative" else "OPRA options feed.",
+              "contracts": chain}
+    ALPACA_CACHE[cache_key] = (time.monotonic(), result)
+    return result
+
+
+
 @app.post('/api/tradingview/{secret}')
 async def push_from_tradingview(secret: str, request: Request):
     if not TOKEN or len(TOKEN) < 24 or not hmac.compare_digest(secret, TOKEN):
@@ -140,7 +298,9 @@ async def status():
         count=conn.execute('SELECT COUNT(DISTINCT ticker) FROM snapshots').fetchone()[0]
     return {'mode':'REAL TRADINGVIEW ALERTS ONLY','simulation':False,'received_tickers':count,
             'bridge_configured':len(TOKEN)>=24,
-            'note':'TradingView embedded widgets cannot supply data to code. No option quotes are fetched.'}
+            'alpaca_options_configured':bool(ALPACA_API_KEY and ALPACA_API_SECRET),
+            'alpaca_options_feed':ALPACA_FEED if ALPACA_API_KEY and ALPACA_API_SECRET else None,
+            'note':'TradingView widgets do not feed Pine signals; Alpaca options endpoints provide read-only snapshots when configured.'}
 
 
 @app.get('/api/tickers')
