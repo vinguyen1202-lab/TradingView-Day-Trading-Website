@@ -7,7 +7,7 @@ MarketPilot is a simple, **read-only** research dashboard for beginner options p
 - **Embedded TradingView chart:** the official TradingView widget; the exchange may delay quotes on public embeds. It is a visual-only widget and does not feed the site's strategy calculations.
 - **Verified historical research data:** real TradingView MCP values fetched in this ChatGPT conversation on October 9, 2026. The pinned JSON in `static/verified_history.json` contains nine historical U.S. stock/ETF quote snapshots plus 25 actual regular-session five-minute candles each for PLTR, CRWV, and NVDA. They are *always* labeled historical, never eligible for a fresh trade.
 - **New/fresh signals:** your TradingView account runs `MarketPilot_TV_Signals.pine` on a five-minute chart. With paid-plan webhook alerts enabled, TradingView sends the close of each completed candle to this website's authenticated receiver. Only recent, in-session alerts can generate `REVIEW_CALL` or `REVIEW_PUT`. If the alert does not arrive, or the market is closed, it shows **WAIT**.
-- **Options chain:** TradingView's options chain is linked, but TradingView MCP and embedded widgets do not expose an official options-chain API for filling independent websites. You enter **actual bid/ask/delta/volume/open interest**, plus your projected exit bids; the latter are **estimates**, not market quotes.
+- **Options chain:** the site can fetch an Alpaca options-chain snapshot for the selected stock. Alpaca supplies bid/ask, Greeks, daily volume, and contract open interest when returned by its contract record. Quotes are labeled with their feed and timestamp. Free `indicative` quotes have delayed trades and modified quotes; the `opra` feed requires an eligible subscription. Projected option exit bids remain **your estimates**, not market quotes.
 
 ## What I can do safely
 
@@ -33,6 +33,17 @@ Render **free** web services can sleep and use ephemeral storage, so a TradingVi
 
 The TradingView webhook is protected by a generated high-entropy secret embedded in the URL. Do not share the full webhook URL. URL-path secrets can appear in private server logs, so lock down log access and rotate the token if exposed. The site is read-only/public unless you configure hosting-layer access controls; never publish brokerage access tokens there. Hosting an API that uses MCP authorization requires a separate server-side authenticated connector and is **not** included: the ChatGPT TradingView MCP connection is not transferable to this website.
 
+## Connect Alpaca options data
+
+1. In Alpaca, open **Paper Trading → API Keys** and generate a key and secret. Use a paper-account key; do not send either value in chat or commit them to GitHub.
+2. In Render, open the MarketPilot web service → **Environment** and add:
+   - `ALPACA_API_KEY_ID` — the Alpaca API key ID
+   - `ALPACA_API_SECRET_KEY` — the matching secret key
+   - Optional: `ALPACA_OPTIONS_FEED` — `indicative` (default; free, delayed/modified) or `opra` (requires the corresponding paid real-time data entitlement).
+3. Save the changes. Render restarts the service. Open **Options Risk Calculator**, select an expiration, and choose a contract row. The quote fills the bid, ask, delta, volume, and open-interest fields.
+
+The website sends only read-only market-data requests to Alpaca. It does not place brokerage orders or access account balances. The option chain refreshes when you open the calculator and approximately every 30 seconds while the tab is visible. Open interest is dated separately from the live quote. The stop/target option prices are still estimates and need manual input.
+
 ## Run on your Mac locally
 
 ```bash
@@ -53,6 +64,8 @@ Open `http://127.0.0.1:8000`. To test the site with actual Pine webhooks, Tradin
 - `GET /api/verified-history/{ticker}` — dated genuine historical TradingView MCP data; decision WAIT always
 - `GET /api/snapshot/{ticker}` — genuinely received Pine webhook data, stale automatically forced to WAIT
 - `GET /api/tickers` — symbols with received alerts
+- `GET /api/options/{ticker}/expirations` — eligible Alpaca option expirations
+- `GET /api/options/{ticker}/chain?expiration_date=YYYY-MM-DD&option_type=call` — read-only contract snapshots
 - `POST /api/tradingview/{secret}` — authenticated JSON alert receiver
 
 ## Tests
