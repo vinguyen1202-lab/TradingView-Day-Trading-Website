@@ -11,7 +11,11 @@ MarketPilot is a simple, **read-only** research dashboard for beginner options p
 
 ## What I can do safely
 
-Choose any ticker (and exchange), compare an actual chart with native verified historical candles and fresh Pine bars, review call/put candidates, and calculate **maximum planned risk of $50**. The option risk calculation explicitly includes expected fees/slippage; it cannot guarantee the maximum realized loss. Journal entries save only in your own browser local storage.
+Choose any ticker (and exchange), compare an actual chart with native verified historical candles and fresh Pine bars, review call/put candidates, and calculate planned option loss using your estimated exit bid plus fees/slippage. The paper-trade calculator has **no preset dollar-loss cap**; planned loss is an estimate, not a guarantee. For a long option, the premium paid can be lost in full. Journal entries save only in your own browser local storage. The interface accepts a positive whole-number contract quantity without a preset maximum.
+
+## Time zone display
+
+The Pine strategy keeps its session checks in New York exchange time. The entry window (9:35–11:00 a.m. ET) is 6:35–8:00 a.m. Pacific Time; premarket is 1:00–6:30 a.m. Pacific, and the regular session is 6:30 a.m.–1:00 p.m. Pacific. The website formats timestamps with the America/Los_Angeles time zone, so they switch between PST and PDT automatically.
 
 ## One-time deployment: GitHub → Render
 
