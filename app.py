@@ -292,6 +292,28 @@ async def push_from_tradingview(secret: str, request: Request):
     return {'received':True,'ticker':clean['ticker'],'decision':clean['decision']}
 
 
+@app.get('/api/stock-quote/{ticker}')
+def stock_quote(ticker: str):
+    """Read-only Alpaca stock snapshot; does not imply a TradingView signal."""
+    ticker=ticker.strip().upper()
+    if not TICKER.fullmatch(ticker):
+        raise HTTPException(400, "Invalid ticker")
+    if not ALPACA_API_KEY or not ALPACA_API_SECRET:
+        raise HTTPException(503, "Alpaca stock data is not configured in Render.")
+    # IEX is the basic entitlement; other exchanges may not be represented.
+    data=alpaca_get(f"https://data.alpaca.markets/v2/stocks/{ticker}/snapshot", {"feed":"iex"})
+    trade=data.get("latestTrade") or {}
+    minute=data.get("minuteBar") or {}
+    daily=data.get("dailyBar") or {}
+    previous=data.get("prevDailyBar") or {}
+    price=trade.get("p") or minute.get("c")
+    return {"ticker":ticker,"feed":"iex","price":price,
+            "trade_time":trade.get("t") or minute.get("t"),
+            "daily_open":daily.get("o"),"daily_high":daily.get("h"),
+            "daily_low":daily.get("l"),"daily_volume":daily.get("v"),
+            "previous_close":previous.get("c"),
+            "source":"Alpaca IEX stock snapshot; not a full-market NBBO or a confirmed trade signal"}
+
 @app.get('/api/status')
 async def status():
     with db_conn() as conn:
