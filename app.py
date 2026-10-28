@@ -200,7 +200,7 @@ def option_expirations(ticker: str):
         raise HTTPException(400, "Invalid ticker")
     feed = alpaca_credentials()
     today = datetime.now(PT).date()
-    start = (today.replace() + timedelta(days=7)).isoformat()
+    start = today.isoformat()
     end = (today.replace() + timedelta(days=21)).isoformat()
     cache_key = ("expirations", ticker, feed)
     cached = ALPACA_CACHE.get(cache_key)
