@@ -357,3 +357,8 @@ async def snapshot(ticker: str):
     return {'ticker':ticker,'status':'STALE_OR_CLOSED' if stale or not market_open else 'FRESH_TRADINGVIEW_ALERT',
             'decision':decision,'latest':last,'bars':records[-90:],'message':msg,
             'age_seconds':round((now_ms-last['bar_time_ms'])/1000), 'market_open':market_open}
+
+
+# Historical research routes are isolated from the live alert relay.
+from quant_lab.api import router as quant_router
+app.include_router(quant_router)
